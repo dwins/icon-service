@@ -25,12 +25,11 @@ class KMLService extends unfiltered.filter.Plan {
 
   def intent = {
     case GET(Path(Seg("kml" :: styleName :: KMZ(dataName) :: Nil))) & HostPort(host, port) =>
-      val prefix = "http://" + host + ":" + port + "/st/" + styleName
       def constructKMZ(style: Style) = 
         withFeatureSource(dataName) { source =>
           val temp = java.io.File.createTempFile("dwins.icons", "kmz")
           withOutStream(temp) { out =>
-            withZipOutStream(out)(writeKMZ(prefix, style, source, _))
+            withZipOutStream(out)(writeKMZ(style, source, _))
           }
           temp
         }
@@ -50,7 +49,7 @@ class KMLService extends unfiltered.filter.Plan {
       def constructKML(style: Style) = 
         withFeatureSource(dataName) { source =>
           val temp = java.io.File.createTempFile("dwins.icons", "kml")
-          withWriter(temp)(writeKML(prefix, style, source, _))
+          withWriter(temp)(writeKML(referenceWriter(prefix), style, source, _))
           temp
         }
       val expected =
@@ -66,61 +65,114 @@ class KMLService extends unfiltered.filter.Plan {
       }
   }
 
-  val inLatLon = {
-    val q = new org.geotools.data.Query
-    q.setCoordinateSystemReproject(
-      org.geotools.referencing.CRS.decode("EPSG:4326"))
-    q
+  val inLatLon = new org.geotools.data.Query
+  inLatLon.setCoordinateSystemReproject(
+    org.geotools.referencing.CRS.decode("EPSG:4326"))
+
+  def writeKMZ(style: Style, features: Iterator[Feature], zipOut: java.util.zip.ZipOutputStream): Unit = {
+    try {
+      val entry = new java.util.zip.ZipEntry(_: String)
+      zipOut.putNextEntry(entry("doc.kml"))
+      val (featuresForWriting, featuresForEmbedding) = features.duplicate
+      withStreamWriter(zipOut)(writeKML(embeddingWriter, style, featuresForWriting, _))
+      zipOut.closeEntry()
+
+      val embeds = 
+        for {
+          f <- featuresForEmbedding
+          DynamicIcon(props) <- iconInfo(style, f).right.toOption
+        } yield (embedHref(props), props)
+
+      for ((name, props) <- embeds.toMap) {
+        zipOut.putNextEntry(entry(name))
+        val image = draw(style, props)
+        javax.imageio.ImageIO.write(image, "PNG", zipOut)
+        zipOut.closeEntry()
+      }
+    } catch {
+      case (e) => e.printStackTrace()
+    }
   }
 
-  def writeKMZ(iconPrefix: String, style: Style, features: Iterator[Feature], zipOut: java.util.zip.ZipOutputStream): Unit = {
-    val entry = new java.util.zip.ZipEntry(_: String)
-    zipOut.putNextEntry(entry("doc.kml"))
-    withStreamWriter(zipOut)(writeKML(iconPrefix, style, features, _))
-  }
+  type StyleEncoder = Either[ExternalRef, DynamicIcon] => scala.xml.Node
 
-  def writeKML(iconPrefix: String, style: Style, features: Iterator[Feature], writer: java.io.Writer): Unit = {
-    val kml =
-      <kml xmlns="http://www.opengis.net/kml/2.2"
-           xmlns:gs="http://www.google.com/kml/ext/2.2">
-        <Document>
-          { placemarks(iconPrefix, style, features) }
-        </Document>
-      </kml>
-    scala.xml.XML.write(writer, kml, enc="UTF-8", xmlDecl=true, doctype=null)
-  }
+  def referenceWriter(iconPrefix: String)(info: Either[ExternalRef, DynamicIcon]): scala.xml.Node =
+    info match {
+      case Left(ExternalRef(href, heading, opacity)) =>
+        val colorMask = "#02xffffff" format math.round(opacity * 255)
+        <IconStyle>
+          <color>{ colorMask }</color>
+          <heading>{ heading }</heading>
+          <Icon>
+            <href>{ href }</href>
+          </Icon>
+        </IconStyle>
+      case Right(DynamicIcon(feature)) =>
+        val href = styleHref(iconPrefix, feature)
+        <IconStyle>
+          <Icon>
+            <href>{ href }</href>
+          </Icon>
+        </IconStyle>
+    }
 
-  def placemarks(iconPrefix: String, style: Style, features: Iterator[Feature]): scala.xml.NodeSeq = {
-    import scala.xml._
+  def embeddingWriter(info: Either[ExternalRef, DynamicIcon]): scala.xml.Node =
+    info match {
+      case Left(ExternalRef(href, heading, opacity)) =>
+        val colorMask = "#02xffffff" format math.round(opacity * 255)
+        <IconStyle>
+          <color>{ colorMask }</color>
+          <heading>{ heading }</heading>
+          <Icon>{ href }</Icon>
+        </IconStyle>
+      case Right(DynamicIcon(props)) =>
+        val href = embedHref(props)
+        <IconStyle>
+          <Icon>
+            <href>{ href }</href>
+          </Icon>
+        </IconStyle>
+    }
 
-    NodeSeq.Empty ++
-    features.map { f =>
-      val centroid = f.getDefaultGeometry.asInstanceOf[com.vividsolutions.jts.geom.Geometry].getCentroid
+  def writeKML(encodeStyle: StyleEncoder, style: Style, features: Iterator[Feature], writer: java.io.Writer): Unit = {
+    val placemarks = for (feature <- features) yield (feature, iconInfo(style, feature))
+    def mkPlacemarkNode(pair: (Feature, Either[ExternalRef, DynamicIcon])): scala.xml.Node = {
+      val (feature, iconInfo) = pair
+      val centroid = feature.getDefaultGeometry.asInstanceOf[com.vividsolutions.jts.geom.Geometry].getCentroid
       <Placemark>
-        <name>{f.getID}</name>
+        <name>{feature.getID}</name>
         <Style>
-          { iconStyles(iconPrefix, style, f) }
+          { encodeStyle(iconInfo) }
         </Style>
         <Point>
           <coordinates>{"%s,%s".format(centroid.getY, centroid.getX)}</coordinates>
         </Point>
       </Placemark>
     }
+      
+    val kml =
+      <kml xmlns="http://www.opengis.net/kml/2.2"
+           xmlns:gs="http://www.google.com/kml/ext/2.2">
+        <Document>
+          { scala.xml.NodeSeq.Empty ++ (placemarks map mkPlacemarkNode) }
+        </Document>
+      </kml>
+    scala.xml.XML.write(writer, kml, enc="UTF-8", xmlDecl=true, doctype=null)
   }
 
-  def embeds(iconPrefix: String, style: Style, features: Iterator[Feature]): Map[String, Map[String, String]] = {
-    def hash(m: Map[String, String]): String = {
-      val digester = java.security.MessageDigest.getInstance("md5")
-      for ((k, v) <- m.toSeq.sorted) {
-        digester.digest(k.getBytes("UTF-8"))
-        digester.digest(v.getBytes("UTF-8"))
-      }
-      digester.digest()
-        .view
-        .map("%x".format(_))
-        .mkString
+  def hash(m: Map[String, String]): String = {
+    val digester = java.security.MessageDigest.getInstance("md5")
+    for ((k, v) <- m.toSeq.sorted) {
+      digester.update(k.getBytes("UTF-8"))
+      digester.update(v.getBytes("UTF-8"))
     }
+    digester.digest()
+      .view
+      .map("%x".format(_))
+      .mkString
+  }
 
+  def embeds(style: Style, features: Iterator[Feature]): Map[String, Map[String, String]] = {
     val infos: Iterator[Map[String, String]] =
       for {
         feature <- features
@@ -130,7 +182,7 @@ class KMLService extends unfiltered.filter.Plan {
   }
 
   case class ExternalRef(url: String, heading: Double, opacity: Double)
-  case class DynamicIcon(feature: Feature)
+  case class DynamicIcon(properties: Map[String, String])
 
   def iconInfo(style: Style, feature: Feature): Either[ExternalRef, DynamicIcon] = {
     val staticHeadingOpacityAndPublicUrl = 
@@ -139,30 +191,7 @@ class KMLService extends unfiltered.filter.Plan {
         u <- publicUrl(style, feature)
       } yield ExternalRef(url = u, heading = h, opacity = o)
 
-    staticHeadingOpacityAndPublicUrl.toLeft(DynamicIcon(feature))
-  }
-
-  def iconStyles(iconPrefix: String, style: Style, feature: Feature): scala.xml.NodeSeq = {
-    def mkStyleElement(styleInfo: Either[ExternalRef, DynamicIcon]): scala.xml.Elem =
-      styleInfo match {
-        case Left(ExternalRef(href, heading, opacity)) =>
-          val colorMask = "#02xffffff" format math.round(opacity * 255)
-          <IconStyle>
-            <color>{ colorMask }</color>
-            <heading>{ heading }</heading>
-            <Icon>
-              <href>{ href }</href>
-            </Icon>
-          </IconStyle>
-        case Right(DynamicIcon(feature)) =>
-          val href = styleHref(iconPrefix, style, feature)
-          <IconStyle>
-            <Icon>
-              <href>{ href }</href>
-            </Icon>
-          </IconStyle>
-      }
-    mkStyleElement(iconInfo(style, feature))
+    staticHeadingOpacityAndPublicUrl.toLeft(DynamicIcon(asMap(feature)))
   }
 
   def scaleValue(style: Style, feature: Feature): Double =
@@ -170,21 +199,24 @@ class KMLService extends unfiltered.filter.Plan {
 
   def asMap(f: Feature): Map[String, String] =
     f.getProperties.asScala
+     .filterNot { p => p.getName.getLocalPart == f.getFeatureType.getGeometryDescriptor.getLocalName }
      .map { p => (p.getName.getLocalPart, String.valueOf(p.getValue)) }
      .toMap 
 
-  def styleHref(iconPrefix: String, style: Style, feature: Feature): String = {
+  def styleHref(iconPrefix: String, props: Map[String, String]): String = {
     import java.net.URLEncoder.encode
     def query(m: Map[String, String]): String =
-      m.filterKeys(_ != feature.getFeatureType.getGeometryDescriptor.getLocalName)
-       .map { case (k, v) => "%s=%s".format(k, encode(v, "UTF-8")) }
+      m.map { case (k, v) => "%s=%s".format(k, encode(v, "UTF-8")) }
        .mkString("&")
-    val q = query(asMap(feature))
+    val q = query(props)
     if (q.isEmpty)
       iconPrefix
     else
       iconPrefix + "?" + q
   }
+
+  def embedHref(props: Map[String, String]): String =
+    "files/%s.png" format hash(props)
 
   def staticHeading(style: Style, feature: Feature): Option[(Double, Double)] = {
     val graphics: Seq[org.geotools.styling.Graphic] = 
@@ -250,7 +282,7 @@ class KMLService extends unfiltered.filter.Plan {
     try
       op(writer)
     finally
-      writer.close()
+      writer.flush()
   }
 
   def withOutStream[T]

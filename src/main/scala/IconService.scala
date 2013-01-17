@@ -16,15 +16,6 @@ class IconService extends unfiltered.filter.Plan {
     case GET(Path("/")) =>
       Ok ~> PlainTextContent ~> ResponseString("hi")
     case GET(Path(Seg("st" :: styleName :: Nil))) & Params(params) =>
-    //  val expected = 
-    //    for (style <- readStyle(styleName).right) yield style
-    //  expected match {
-    //    case Left(err) => 
-    //      BadRequest ~> PlainTextContent ~> ResponseString(err)
-    //    case Right(style) =>
-    //      Ok ~> PlainTextContent ~> ResponseString(summarize(style))
-    //  }
-    //case GET(Path(Seg("st" :: styleName :: ftStyleIndex :: ruleIndex :: Nil))) & Params(params) =>
       def asInt(s:String) = 
         try
           Some(s.toInt)
@@ -35,11 +26,12 @@ class IconService extends unfiltered.filter.Plan {
         for {
           style <- readStyle(styleName).right
         } yield pointStyle(style)
+      val simpleParams = params collect { case (k, Seq(v, _*)) => (k, v) }
       expected match {
         case Left(err) =>
           BadRequest ~> PlainTextContent ~> ResponseString(err)
         case Right(rule) =>
-          Ok ~> ContentType("image/png") ~> ResponseBytes(png(draw(rule, params)))
+          Ok ~> ContentType("image/png") ~> ResponseBytes(png(draw(rule, simpleParams)))
       }
   }
 
@@ -105,80 +97,10 @@ class IconService extends unfiltered.filter.Plan {
     ruleNames.mkString("\n")
   }
 
-  def draw(style: Style, params: Map[String, Seq[String]])/* : java.awt.image.BufferedImage */= {
-    val (col, feature) = sample(params)
-    val graphics = 
-      for {
-        ftStyle <- style.featureTypeStyles.asScala
-        rule <- ftStyle.rules.asScala
-        sym <- rule.symbolizers.asScala
-        if sym.isInstanceOf[org.opengis.style.PointSymbolizer]
-      } yield sym.asInstanceOf[org.opengis.style.PointSymbolizer].getGraphic
-    def gsize(g: org.opengis.style.Graphic): Int =
-      (for {
-        graphic <- Option(g)
-        sizeExp <- Option(graphic.getSize)
-      } yield sizeExp.evaluate(feature, classOf[Int])).getOrElse(16)
-    val size = graphics.map(gsize).max
-    render(size + 2, style, col)
-  }
-
-  def sample(params: Map[String, Seq[String]]): 
-    Pair[org.geotools.data.simple.SimpleFeatureCollection,
-         org.opengis.feature.simple.SimpleFeature] = 
-  {
-    val schemaBuilder = new org.geotools.feature.simple.SimpleFeatureTypeBuilder
-    schemaBuilder.setName("example")
-    schemaBuilder.setNamespaceURI("http://example.com/")
-    schemaBuilder.setSRS("EPSG:4326")
-    params.keySet.foreach { k => schemaBuilder.add(k, classOf[String]) }
-    schemaBuilder.add("the_geom", classOf[com.vividsolutions.jts.geom.Point])
-    val schema = schemaBuilder.buildFeatureType()
-    val featureBuilder = new org.geotools.feature.simple.SimpleFeatureBuilder(schema)
-    params.filter(_._2.nonEmpty).foreach {
-      case (k, v) => featureBuilder.set(k, v.head)
-    }
-    featureBuilder.set("the_geom", point(0,0))
-    val feature = featureBuilder.buildFeature(null)
-    val collection = new org.geotools.data.memory.MemoryFeatureCollection(schema)
-    collection.add(feature)
-    (collection, feature)
-  }
-
-  def render(size: Int, style: Style, features: org.geotools.data.simple.SimpleFeatureCollection) = {
-    val raster = mkImage(size)
-    val screenBounds = new java.awt.Rectangle(0, 0, size, size)
-    val latLon = org.geotools.referencing.CRS.decode("EPSG:4326")
-    val worldBounds = new org.geotools.geometry.jts.ReferencedEnvelope(-1, 1, -1, 1, latLon)
-    val renderer = new org.geotools.renderer.lite.StreamingRenderer
-    val mapContent = new org.geotools.map.MapContent
-    mapContent.layers.add(
-      new org.geotools.map.FeatureLayer(features, style))
-    renderer.setMapContent(mapContent)
-    val graphics = raster.createGraphics()
-    graphics.setRenderingHint(
-      java.awt.RenderingHints.KEY_ANTIALIASING, java.awt.RenderingHints.VALUE_ANTIALIAS_ON)
-    renderer.paint(graphics, screenBounds, worldBounds)
-    graphics.dispose()
-    mapContent.dispose()
-    raster
-  }
-
-  def mkImage(size: Int): java.awt.image.BufferedImage = {
-    import java.awt.image.BufferedImage
-    new BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB)
-  }
-
   def png(image: java.awt.image.BufferedImage): Array[Byte] = {
     val out = new java.io.ByteArrayOutputStream
     javax.imageio.ImageIO.write(image, "PNG", out)
     out.toByteArray
-  }
-
-  def point(x: Double, y: Double): com.vividsolutions.jts.geom.Point = {
-    val geometryFactory = new com.vividsolutions.jts.geom.GeometryFactory
-    val coord = new com.vividsolutions.jts.geom.Coordinate
-    geometryFactory.createPoint(coord)
   }
 
   def graphics(s: org.geotools.styling.Symbolizer): Seq[org.opengis.style.GraphicalSymbol] = {

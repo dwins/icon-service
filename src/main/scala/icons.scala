@@ -58,4 +58,75 @@ package object icons {
         goodSchemes.contains(url.getProtocol) && !badHosts.contains(url.getHost)
       }
   }
+
+  def draw(style: Style, params: Map[String, String]) = {
+    val (col, feature) = sample(params)
+    val graphics = 
+      for {
+        ftStyle <- style.featureTypeStyles.asScala
+        rule <- ftStyle.rules.asScala
+        sym <- rule.symbolizers.asScala
+        if sym.isInstanceOf[org.opengis.style.PointSymbolizer]
+      } yield sym.asInstanceOf[org.opengis.style.PointSymbolizer].getGraphic
+    def gsize(g: org.opengis.style.Graphic): Int =
+      (for {
+        graphic <- Option(g)
+        sizeExp <- Option(graphic.getSize)
+      } yield sizeExp.evaluate(feature, classOf[Int])).getOrElse(16)
+    val size = graphics.map(gsize).max
+    render(size + 2, style, col)
+  }
+
+  def sample(params: Map[String, String]): 
+    Pair[org.geotools.data.simple.SimpleFeatureCollection,
+         org.opengis.feature.simple.SimpleFeature] = 
+  {
+    val schemaBuilder = new org.geotools.feature.simple.SimpleFeatureTypeBuilder
+    schemaBuilder.setName("example")
+    schemaBuilder.setNamespaceURI("http://example.com/")
+    schemaBuilder.setSRS("EPSG:4326")
+    params.keySet.foreach { k => schemaBuilder.add(k, classOf[String]) }
+    schemaBuilder.add("the_geom", classOf[com.vividsolutions.jts.geom.Point])
+    val schema = schemaBuilder.buildFeatureType()
+    val featureBuilder = new org.geotools.feature.simple.SimpleFeatureBuilder(schema)
+    params.foreach {
+      case (k, v) => featureBuilder.set(k, v)
+    }
+    featureBuilder.set("the_geom", point(0,0))
+    val feature = featureBuilder.buildFeature(null)
+    val collection = new org.geotools.data.memory.MemoryFeatureCollection(schema)
+    collection.add(feature)
+    (collection, feature)
+  }
+
+  def render(size: Int, style: Style, features: org.geotools.data.simple.SimpleFeatureCollection) = {
+    val raster = mkImage(size)
+    val screenBounds = new java.awt.Rectangle(0, 0, size, size)
+    val latLon = org.geotools.referencing.CRS.decode("EPSG:4326")
+    val worldBounds = new org.geotools.geometry.jts.ReferencedEnvelope(-1, 1, -1, 1, latLon)
+    val renderer = new org.geotools.renderer.lite.StreamingRenderer
+    val mapContent = new org.geotools.map.MapContent
+    mapContent.layers.add(
+      new org.geotools.map.FeatureLayer(features, style))
+    renderer.setMapContent(mapContent)
+    val graphics = raster.createGraphics()
+    graphics.setRenderingHint(
+      java.awt.RenderingHints.KEY_ANTIALIASING, java.awt.RenderingHints.VALUE_ANTIALIAS_ON)
+    renderer.paint(graphics, screenBounds, worldBounds)
+    graphics.dispose()
+    mapContent.dispose()
+    raster
+  }
+
+  def mkImage(size: Int): java.awt.image.BufferedImage = {
+    import java.awt.image.BufferedImage
+    new BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB)
+  }
+
+  def point(x: Double, y: Double): com.vividsolutions.jts.geom.Point = {
+    val geometryFactory = new com.vividsolutions.jts.geom.GeometryFactory
+    val coord = new com.vividsolutions.jts.geom.Coordinate
+    geometryFactory.createPoint(coord)
+  }
+
 }
