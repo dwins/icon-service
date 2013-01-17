@@ -15,8 +15,36 @@ class KMLService extends unfiltered.filter.Plan {
       else
         None
   }
+  object KMZ {
+    def unapply(s: String): Option[String] =
+      if (s endsWith ".kmz")
+        Some(s dropRight 4)
+      else
+        None
+  }
 
   def intent = {
+    case GET(Path(Seg("kml" :: styleName :: KMZ(dataName) :: Nil))) & HostPort(host, port) =>
+      val prefix = "http://" + host + ":" + port + "/st/" + styleName
+      def constructKMZ(style: Style) = 
+        withFeatureSource(dataName) { source =>
+          val temp = java.io.File.createTempFile("dwins.icons", "kmz")
+          withOutStream(temp) { out =>
+            withZipOutStream(out)(writeKMZ(prefix, style, source, _))
+          }
+          temp
+        }
+      val expected =
+        for {
+          sty <- readStyle(styleName).right
+          kmzFile <- constructKMZ(sty).right
+        } yield kmzFile
+      expected match {
+        case Left(err) =>
+          InternalServerError ~> PlainTextContent ~> ResponseString(err)
+        case Right(kmzFile) =>
+          Ok ~> ContentType("application/vnd.google-earth.kmz") ~> file(kmzFile)
+      }
     case GET(Path(Seg("kml" :: styleName :: KML(dataName) :: Nil))) & HostPort(host, port) =>
       val prefix = "http://" + host + ":" + port + "/st/" + styleName
       def constructKML(style: Style) = 
@@ -25,13 +53,11 @@ class KMLService extends unfiltered.filter.Plan {
           withWriter(temp)(writeKML(prefix, style, source, _))
           temp
         }
-
       val expected =
         for {
           sty <- readStyle(styleName).right
           kmlFile <- constructKML(sty).right
         } yield kmlFile
-
       expected match {
         case Left(err) =>
           InternalServerError ~> PlainTextContent ~> ResponseString(err)
@@ -45,6 +71,12 @@ class KMLService extends unfiltered.filter.Plan {
     q.setCoordinateSystemReproject(
       org.geotools.referencing.CRS.decode("EPSG:4326"))
     q
+  }
+
+  def writeKMZ(iconPrefix: String, style: Style, features: FeatureSource, zipOut: java.util.zip.ZipOutputStream): Unit = {
+    val entry = new java.util.zip.ZipEntry(_: String)
+    zipOut.putNextEntry(entry("doc.kml"))
+    withStreamWriter(zipOut)(writeKML(iconPrefix, style, features, _))
   }
 
   def writeKML(iconPrefix: String, style: Style, features: FeatureSource, writer: java.io.Writer): Unit = {
@@ -175,6 +207,39 @@ class KMLService extends unfiltered.filter.Plan {
       op(writer)
     finally
       writer.close()
+  }
+
+  def withStreamWriter[T]
+    (out: java.io.OutputStream)
+    (op: java.io.Writer => T): T = 
+  {
+    val writer = new java.io.OutputStreamWriter(out)
+    try
+      op(writer)
+    finally
+      writer.close()
+  }
+
+  def withOutStream[T]
+    (file: java.io.File)
+    (op: java.io.OutputStream => T): T =
+  {
+    val writer = new java.io.FileOutputStream(file)
+    try
+      op(writer)
+    finally
+      writer.close()
+  }
+
+  def withZipOutStream[T]
+    (outStream: java.io.OutputStream)
+    (op: java.util.zip.ZipOutputStream => T): T =
+  {
+    val zipStream = new java.util.zip.ZipOutputStream(outStream)
+    try
+      op(zipStream)
+    finally
+      zipStream.close()
   }
 
   def file(path: java.io.File): ResponseStreamer =
