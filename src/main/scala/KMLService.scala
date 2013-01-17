@@ -80,15 +80,19 @@ class KMLService extends unfiltered.filter.Plan {
   }
 
   def iconStyles(iconPrefix: String, style: Style, f: Feature): scala.xml.NodeSeq = {
-    val staticHeadingAndPublicUrl = 
+    val staticHeadingOpacityAndPublicUrl = 
       for {
-        h <- staticHeading(style, f)
+        (h, o) <- staticHeading(style, f)
         u <- publicUrl(style, f)
-      } yield (h, u)
+      } yield (h, o, u)
 
-    val (heading, href) = staticHeadingAndPublicUrl getOrElse (360, styleHref(iconPrefix, style, f))
+    val (heading, opacity, href) = staticHeadingOpacityAndPublicUrl getOrElse (360d, 1d, styleHref(iconPrefix, style, f))
 
     <IconStyle>
+      <color>{
+        // we encode the opacity as an alpha value in the color mask.
+        "#%02xffffff" format math.round(opacity * 255)
+      }</color>
       <scale>{scaleValue(style, f)}</scale>
       <heading>{ heading }</heading>
       <Icon>
@@ -117,7 +121,7 @@ class KMLService extends unfiltered.filter.Plan {
       iconPrefix + "?" + q
   }
 
-  def staticHeading(style: Style, feature: Feature): Option[Double] = {
+  def staticHeading(style: Style, feature: Feature): Option[(Double, Double)] = {
     val graphics: Seq[org.geotools.styling.Graphic] = 
       for {
         ft <- style.featureTypeStyles.asScala
@@ -127,11 +131,18 @@ class KMLService extends unfiltered.filter.Plan {
       } yield s.asInstanceOf[org.geotools.styling.PointSymbolizer].getGraphic
 
     Some(graphics)
-      .collect { case Seq(g) => g.getRotation }
-      .map { expr => 
-        val raw = expr.evaluate(feature, classOf[Double])
-        val clamped = (raw % 360d)
-        if (clamped <= 0) clamped + 360d else clamped
+      .collect { case Seq(g) => 
+        val rotationExp = g.getRotation
+        val opacityExp = g.getOpacity
+        val rawRotation = rotationExp.evaluate(feature, classOf[Double])
+        val clampedRotation = (rawRotation % 360d)
+        val rotation = 
+          if (clampedRotation <= 0)
+            clampedRotation + 360d
+          else
+            clampedRotation
+        val opacity = opacityExp.evaluate(feature, classOf[Double]) 
+        (rotation, opacity)
       }
   }
 
