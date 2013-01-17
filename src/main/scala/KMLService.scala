@@ -73,24 +73,21 @@ class KMLService extends unfiltered.filter.Plan {
     q
   }
 
-  def writeKMZ(iconPrefix: String, style: Style, features: FeatureSource, zipOut: java.util.zip.ZipOutputStream): Unit = {
+  def writeKMZ(iconPrefix: String, style: Style, features: Iterator[Feature], zipOut: java.util.zip.ZipOutputStream): Unit = {
     val entry = new java.util.zip.ZipEntry(_: String)
     zipOut.putNextEntry(entry("doc.kml"))
     withStreamWriter(zipOut)(writeKML(iconPrefix, style, features, _))
   }
 
-  def writeKML(iconPrefix: String, style: Style, features: FeatureSource, writer: java.io.Writer): Unit = {
-    val iter = features.getFeatures(inLatLon).features
-    try {
-      val kml =
-        <kml xmlns="http://www.opengis.net/kml/2.2"
-             xmlns:gs="http://www.google.com/kml/ext/2.2">
-          <Document>
-            { placemarks(iconPrefix, style, Iterator.continually(iter.next).takeWhile(_ => iter.hasNext)) }
-          </Document>
-        </kml>
-      scala.xml.XML.write(writer, kml, enc="UTF-8", xmlDecl=true, doctype=null)
-    } finally iter.close
+  def writeKML(iconPrefix: String, style: Style, features: Iterator[Feature], writer: java.io.Writer): Unit = {
+    val kml =
+      <kml xmlns="http://www.opengis.net/kml/2.2"
+           xmlns:gs="http://www.google.com/kml/ext/2.2">
+        <Document>
+          { placemarks(iconPrefix, style, features) }
+        </Document>
+      </kml>
+    scala.xml.XML.write(writer, kml, enc="UTF-8", xmlDecl=true, doctype=null)
   }
 
   def placemarks(iconPrefix: String, style: Style, features: Iterator[Feature]): scala.xml.NodeSeq = {
@@ -111,42 +108,78 @@ class KMLService extends unfiltered.filter.Plan {
     }
   }
 
-  def iconStyles(iconPrefix: String, style: Style, f: Feature): scala.xml.NodeSeq = {
+  def embeds(iconPrefix: String, style: Style, features: Iterator[Feature]): Map[String, Map[String, String]] = {
+    def hash(m: Map[String, String]): String = {
+      val digester = java.security.MessageDigest.getInstance("md5")
+      for ((k, v) <- m.toSeq.sorted) {
+        digester.digest(k.getBytes("UTF-8"))
+        digester.digest(v.getBytes("UTF-8"))
+      }
+      digester.digest()
+        .view
+        .map("%x".format(_))
+        .mkString
+    }
+
+    val infos: Iterator[Map[String, String]] =
+      for {
+        feature <- features
+        if iconInfo(style, feature).isRight
+      } yield asMap(feature)
+    infos.map(m => (hash(m), m)).toMap
+  }
+
+  case class ExternalRef(url: String, heading: Double, opacity: Double)
+  case class DynamicIcon(feature: Feature)
+
+  def iconInfo(style: Style, feature: Feature): Either[ExternalRef, DynamicIcon] = {
     val staticHeadingOpacityAndPublicUrl = 
       for {
-        (h, o) <- staticHeading(style, f)
-        u <- publicUrl(style, f)
-      } yield (h, o, u)
+        (h, o) <- staticHeading(style, feature)
+        u <- publicUrl(style, feature)
+      } yield ExternalRef(url = u, heading = h, opacity = o)
 
-    val (heading, opacity, href) = staticHeadingOpacityAndPublicUrl getOrElse (360d, 1d, styleHref(iconPrefix, style, f))
+    staticHeadingOpacityAndPublicUrl.toLeft(DynamicIcon(feature))
+  }
 
-    <IconStyle>
-      <color>{
-        // we encode the opacity as an alpha value in the color mask.
-        "#%02xffffff" format math.round(opacity * 255)
-      }</color>
-      <scale>{scaleValue(style, f)}</scale>
-      <heading>{ heading }</heading>
-      <Icon>
-        <href>{ href }</href>
-      </Icon>
-    </IconStyle>
+  def iconStyles(iconPrefix: String, style: Style, feature: Feature): scala.xml.NodeSeq = {
+    def mkStyleElement(styleInfo: Either[ExternalRef, DynamicIcon]): scala.xml.Elem =
+      styleInfo match {
+        case Left(ExternalRef(href, heading, opacity)) =>
+          val colorMask = "#02xffffff" format math.round(opacity * 255)
+          <IconStyle>
+            <color>{ colorMask }</color>
+            <heading>{ heading }</heading>
+            <Icon>
+              <href>{ href }</href>
+            </Icon>
+          </IconStyle>
+        case Right(DynamicIcon(feature)) =>
+          val href = styleHref(iconPrefix, style, feature)
+          <IconStyle>
+            <Icon>
+              <href>{ href }</href>
+            </Icon>
+          </IconStyle>
+      }
+    mkStyleElement(iconInfo(style, feature))
   }
 
   def scaleValue(style: Style, feature: Feature): Double =
     iconSize(style, feature) / 16d
 
+  def asMap(f: Feature): Map[String, String] =
+    f.getProperties.asScala
+     .map { p => (p.getName.getLocalPart, String.valueOf(p.getValue)) }
+     .toMap 
+
   def styleHref(iconPrefix: String, style: Style, feature: Feature): String = {
     import java.net.URLEncoder.encode
-    def query(m: Map[String, Any]): String =
+    def query(m: Map[String, String]): String =
       m.filterKeys(_ != feature.getFeatureType.getGeometryDescriptor.getLocalName)
-       .map { case (k, v) => "%s=%s".format(k, encode(String.valueOf(v), "UTF-8")) }
+       .map { case (k, v) => "%s=%s".format(k, encode(v, "UTF-8")) }
        .mkString("&")
-    val attMap = 
-      feature.getProperties.asScala
-       .map { p => (p.getName.getLocalPart, p.getValue) }
-       .toMap 
-    val q = query(attMap)
+    val q = query(asMap(feature))
     if (q.isEmpty)
       iconPrefix
     else
@@ -258,7 +291,7 @@ class KMLService extends unfiltered.filter.Plan {
 
   def withFeatureSource[T]
     (name: String)
-    (op: FeatureSource => T): Either[String, T] =
+    (op: Iterator[Feature] => T): Either[String, T] =
   {
     val dataDir = new java.io.File("data").toURI.toURL
     val params: java.util.Map[_,_] = Map("url" -> dataDir).asJava
@@ -266,12 +299,18 @@ class KMLService extends unfiltered.filter.Plan {
     val fac = new org.geotools.data.shapefile.ShapefileDataStoreFactory
     val store = fac.createDataStore(params)
 
-    try 
-      Right(op(store.getFeatureSource(name)))
-    catch {
-      case (e: java.io.IOException) => Left(e.getMessage)
-    }
-    finally 
+    try {
+      val source = store.getFeatureSource(name)
+      val features = source.getFeatures(inLatLon).features
+      val iter = Iterator.continually(features.next).takeWhile(_ => features.hasNext)
+      try
+        Right(op(iter))
+      catch {
+        case (e: java.io.IOException) => Left(e.getMessage)
+      }
+      finally 
+        features.close()
+    } finally
       store.dispose()
   }
 }
