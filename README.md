@@ -25,7 +25,7 @@ For KML, issue requests like:
 
     curl http://localhost:8080/kml/{style}/{data}.kml
 
-{style} is once again the name (without .sld) of a stlye file in the styles/ directory.  {data} on the other hand is the name of a shapefile in the data/ directory (also without the file extension).  I recommend accessing this url in Google Earth instead of with curl though!
+{style} is once again the name (without .sld) of a stlye file in the styles/ directory.  {data} on the other hand is the name of a shapefile in the data/ directory (also without the file extension).  I recommend accessing this url in Google Earth instead of with curl though!  You can switch the suffix to .kmz for a KMZ file with dynamic icons embedded.
 
 ## Components
 
