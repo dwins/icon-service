@@ -14,7 +14,7 @@ class KMLService extends unfiltered.filter.Plan {
       def constructKML(style: Style) = 
         withFeatureSource(name) { source =>
           val temp = java.io.File.createTempFile("dwins.icons", "kml")
-          withWriter(temp)(writeKML(style, source, _))
+          withWriter(temp)(writeKML(styleName, style, source, _))
           temp
         }
 
@@ -39,21 +39,21 @@ class KMLService extends unfiltered.filter.Plan {
     q
   }
 
-  def writeKML(style: Style, features: FeatureSource, writer: java.io.Writer): Unit = {
+  def writeKML(styleName: String, style: Style, features: FeatureSource, writer: java.io.Writer): Unit = {
     val iter = features.getFeatures(inLatLon).features
     try {
       val kml =
         <kml xmlns="http://www.opengis.net/kml/2.2"
              xmlns:gs="http://www.google.com/kml/ext/2.2">
           <Document>
-            { placemarks(style, Iterator.continually(iter.next).takeWhile(_ => iter.hasNext)) }
+            { placemarks(styleName, style, Iterator.continually(iter.next).takeWhile(_ => iter.hasNext)) }
           </Document>
         </kml>
       scala.xml.XML.write(writer, kml, enc="UTF-8", xmlDecl=true, doctype=null)
     } finally iter.close
   }
 
-  def placemarks(style: Style, features: Iterator[Feature]): scala.xml.NodeSeq = {
+  def placemarks(styleName: String, style: Style, features: Iterator[Feature]): scala.xml.NodeSeq = {
     import scala.xml._
 
     NodeSeq.Empty ++
@@ -62,7 +62,7 @@ class KMLService extends unfiltered.filter.Plan {
       <Placemark>
         <name>{f.getID}</name>
         <Style>
-          { iconStyles(style, f) }
+          { iconStyles(styleName, style, f) }
         </Style>
         <Point>
           <coordinates>{"%s,%s".format(centroid.getY, centroid.getX)}</coordinates>
@@ -71,14 +71,14 @@ class KMLService extends unfiltered.filter.Plan {
     }
   }
 
-  def iconStyles(style: Style, f: Feature): scala.xml.NodeSeq = {
+  def iconStyles(styleName: String, style: Style, f: Feature): scala.xml.NodeSeq = {
     val staticHeadingAndPublicUrl = 
       for {
         h <- staticHeading(style, f)
         u <- publicUrl(style, f)
       } yield (h, u)
 
-    val (heading, href) = staticHeadingAndPublicUrl getOrElse (360, styleHref(style, f))
+    val (heading, href) = staticHeadingAndPublicUrl getOrElse (360, styleHref(styleName, style, f))
 
     <IconStyle>
       <scale>{scaleValue(style, f)}</scale>
@@ -92,8 +92,8 @@ class KMLService extends unfiltered.filter.Plan {
   def scaleValue(style: Style, feature: Feature): Double =
     iconSize(style, feature) / 16d
 
-  def styleHref(style: Style, feature: Feature): String = {
-    val prefix = "http://10.52.5.135:9090/st/poi_dynamic"
+  def styleHref(styleName: String, style: Style, feature: Feature): String = {
+    val prefix = "http://10.52.5.135:9090/st/" + styleName
     import java.net.URLEncoder.encode
     def query(m: Map[String, Any]): String =
       m.filterKeys(_ != feature.getFeatureType.getGeometryDescriptor.getLocalName)
