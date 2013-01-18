@@ -35,6 +35,7 @@ package object icons {
       for {
         ftStyle <- style.featureTypeStyles.asScala
         rule <- ftStyle.rules.asScala
+        if applicable(feature)(rule)
         sym <- rule.symbolizers.asScala
         if sym.isInstanceOf[org.opengis.style.PointSymbolizer]
         ptSym = sym.asInstanceOf[org.opengis.style.PointSymbolizer]
@@ -42,8 +43,12 @@ package object icons {
         if graphic != null
         if graphic.getSize != null
       } yield graphic.getSize.evaluate(feature, classOf[Int])
+    println(graphicSizes)
     graphicSizes.reduceOption(_ max _).getOrElse(16)
   }
+
+  def applicable(f: Feature): org.geotools.styling.Rule => Boolean =
+    r => Option(r.getFilter).forall(_ evaluate f)
 
   /**
    * True iff the given URL should be included verbatim in KML output.

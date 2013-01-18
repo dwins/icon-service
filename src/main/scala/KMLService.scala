@@ -80,7 +80,7 @@ class KMLService extends unfiltered.filter.Plan {
       val embeds = 
         for {
           f <- featuresForEmbedding
-          DynamicIcon(props) <- iconInfo(style, f).right.toOption
+          DynamicIcon(_, props) <- iconInfo(style, f).right.toOption
         } yield (embedHref(props), props)
 
       for ((name, props) <- embeds.toMap) {
@@ -98,18 +98,20 @@ class KMLService extends unfiltered.filter.Plan {
 
   def referenceWriter(iconPrefix: String)(info: Either[ExternalRef, DynamicIcon]): scala.xml.Node =
     info match {
-      case Left(ExternalRef(href, heading, opacity)) =>
+      case Left(ExternalRef(href, scale, heading, opacity)) =>
         val colorMask = "#02xffffff" format math.round(opacity * 255)
         <IconStyle>
           <color>{ colorMask }</color>
+          <scale>{ scale }</scale>
           <heading>{ heading }</heading>
           <Icon>
             <href>{ href }</href>
           </Icon>
         </IconStyle>
-      case Right(DynamicIcon(feature)) =>
+      case Right(DynamicIcon(scale, feature)) =>
         val href = styleHref(iconPrefix, feature)
         <IconStyle>
+          <scale>{ scale }</scale>
           <Icon>
             <href>{ href }</href>
           </Icon>
@@ -118,16 +120,18 @@ class KMLService extends unfiltered.filter.Plan {
 
   def embeddingWriter(info: Either[ExternalRef, DynamicIcon]): scala.xml.Node =
     info match {
-      case Left(ExternalRef(href, heading, opacity)) =>
+      case Left(ExternalRef(href, scale, heading, opacity)) =>
         val colorMask = "#02xffffff" format math.round(opacity * 255)
         <IconStyle>
           <color>{ colorMask }</color>
+          <scale>{ scale }</scale>
           <heading>{ heading }</heading>
           <Icon>{ href }</Icon>
         </IconStyle>
-      case Right(DynamicIcon(props)) =>
+      case Right(DynamicIcon(scale, props)) =>
         val href = embedHref(props)
         <IconStyle>
+          <scale>{ scale }</scale>
           <Icon>
             <href>{ href }</href>
           </Icon>
@@ -172,30 +176,90 @@ class KMLService extends unfiltered.filter.Plan {
       .mkString
   }
 
-  def embeds(style: Style, features: Iterator[Feature]): Map[String, Map[String, String]] = {
-    val infos: Iterator[Map[String, String]] =
-      for {
-        feature <- features
-        if iconInfo(style, feature).isRight
-      } yield asMap(feature)
-    infos.map(m => (hash(m), m)).toMap
-  }
-
-  case class ExternalRef(url: String, heading: Double, opacity: Double)
-  case class DynamicIcon(properties: Map[String, String])
+  case class ExternalRef(url: String, scale: Double, heading: Double, opacity: Double)
+  case class DynamicIcon(scale: Double, properties: Map[String, String])
 
   def iconInfo(style: Style, feature: Feature): Either[ExternalRef, DynamicIcon] = {
     val staticHeadingOpacityAndPublicUrl = 
       for {
         (h, o) <- staticHeading(style, feature)
         u <- publicUrl(style, feature)
-      } yield ExternalRef(url = u, heading = h, opacity = o)
+      } yield ExternalRef(url = u, scale = scaleValue(style, feature), heading = h, opacity = o)
 
-    staticHeadingOpacityAndPublicUrl.toLeft(DynamicIcon(asMap(feature)))
+    staticHeadingOpacityAndPublicUrl.toLeft(
+      DynamicIcon(scaleValue(style, feature), relevantProperties(style, feature)))
   }
 
   def scaleValue(style: Style, feature: Feature): Double =
     iconSize(style, feature) / 16d
+
+  def relevantPropertyNames(style: Style, feature: Feature): Set[String] = {
+    import org.geotools.styling._, org.opengis.filter._, org.opengis.filter.expression._
+    val propsInExpression: Expression => Seq[String] = { expr =>
+      var props: Seq[String] = IndexedSeq.empty
+      object visitor extends org.geotools.filter.visitor.DefaultFilterVisitor {
+        override def visit(
+          prop: org.opengis.filter.expression.PropertyName,
+          extra: AnyRef): AnyRef =
+        {
+          props :+= prop.getPropertyName
+          null
+        }
+      }
+      expr.accept(visitor, null)
+      props
+    }
+    val propsInFilter: Filter => Seq[String] = { expr =>
+      var props: Seq[String] = IndexedSeq.empty
+      object visitor extends org.geotools.filter.visitor.DefaultFilterVisitor {
+        override def visit(
+          prop: org.opengis.filter.expression.PropertyName,
+          extra: AnyRef): AnyRef =
+        {
+          props :+= prop.getPropertyName
+          null
+        }
+      }
+      Option(expr).map(_.accept(visitor, null))
+      props
+    }
+    val propsInSymbolizer: Symbolizer => Seq[String] = {
+      case (p: PointSymbolizer) =>
+        val g = p.getGraphic
+        if (g == null)
+          Nil
+        else {
+          val directProps = 
+            Seq(
+              for (ap <- Option(g.getAnchorPoint); x <- Option(ap.getAnchorPointX)) yield x,
+              for (ap <- Option(g.getAnchorPoint); y <- Option(ap.getAnchorPointY)) yield y,
+              for (d <- Option(g.getDisplacement); x <- Option(d.getDisplacementX)) yield x,
+              for (d <- Option(g.getDisplacement); y <- Option(d.getDisplacementY)) yield y,
+              Option(g.getGap),
+              Option(g.getInitialGap),
+              Option(g.getOpacity),
+              Option(g.getRotation),
+              Option(g.getSize)).flatten
+          // todo: expressions in marks and externalgraphics
+          directProps.flatMap(propsInExpression)
+        }
+      case _ => Nil
+    }
+
+    val propsInSymbolizers: Rule => Seq[String] = _.symbolizers.asScala flatMap propsInSymbolizer
+    val rules =
+      for {
+        ftStyle <- style.featureTypeStyles.asScala
+        rule <- ftStyle.rules.asScala
+      } yield rule
+    val filterProps = rules.flatMap(r => propsInFilter(r.getFilter))
+    val symbolizerProps = 
+      rules.filter(applicable(feature)).flatMap(propsInSymbolizers)
+    (filterProps ++ symbolizerProps).toSet
+  }
+
+  def relevantProperties(style: Style, feature: Feature): Map[String, String] =
+    asMap(feature).filterKeys(relevantPropertyNames(style, feature))
 
   def asMap(f: Feature): Map[String, String] =
     f.getProperties.asScala
